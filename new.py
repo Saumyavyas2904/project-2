@@ -71,34 +71,31 @@ all_time_values = []
 all_h_vel_values = []
 all_v_vel_values = []
 all_a_vel_values = []
-current_sensor_id = {'value': 1}
-is_valid_sensor_id = {'value': True}
-selected_month = {'value': None}
-is_month_active = {'value': False}
+current_sensor_id = 1  # Default value
+is_valid_sensor_id = True
+selected_month = None
+is_month_active = False
 time_window = 120
 freq_window = 10
 start_time = time.time()
-is_paused = {'value': False}
-window_start_time = {'value': None}
+is_paused = False
+window_start_time = None
 scroll_step = 60
-is_scrolling = {'value': True}
-show_h = {'value': True}
-show_v = {'value': True}
-show_a = {'value': True}
+is_scrolling = True
+show_h = True
+show_v = True
+show_a = True
 
-# Database connection with retry logic
+# Database connection with retry logic using DATABASE_URL
 def connect_db():
     max_retries = 3
     retry_delay = 5
     for attempt in range(max_retries):
         try:
-            conn = connect(
-                dbname=os.getenv("DB_NAME", "vibration_data_db"),
-                user=os.getenv("DB_USER", "postgres"),
-                password=os.getenv("DB_PASSWORD", "123"),
-                host=os.getenv("DB_HOST", "localhost"),
-                port=os.getenv("DB_PORT", "5432")
-            )
+            db_url = os.getenv("DATABASE_URL")
+            if not db_url:
+                raise ValueError("DATABASE_URL environment variable not set")
+            conn = connect(db_url)
             cursor = conn.cursor()
             logger.info("Connected to PostgreSQL successfully!")
             return conn, cursor
@@ -114,21 +111,21 @@ conn, cursor = connect_db()
 def fetch_latest_data():
     try:
         logger.info("Fetching data...")
-        if not is_valid_sensor_id['value'] or current_sensor_id['value'] is None:
+        if not is_valid_sensor_id or current_sensor_id is None:
             logger.warning("No valid sensor ID.")
             return None, None, None, None
             
-        if is_month_active['value'] and selected_month['value'] is not None:
+        if is_month_active and selected_month is not None:
             current_year = datetime.datetime.now().year
-            start_date = datetime.datetime(current_year, selected_month['value'], 1)
+            start_date = datetime.datetime(current_year, selected_month, 1)
             end_date = (start_date + datetime.timedelta(days=31)).replace(day=1, year=current_year) - datetime.timedelta(days=1)
             logger.info(f"Querying data for {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
             cursor.execute("""
-                SELECT h_vel, v_vel, a_vel, timestamp
+                SELECT h_vel, v_vel, a_vel, sample
                 FROM samples 
-                WHERE sensor_id = %s AND timestamp >= %s AND timestamp <= %s
-                ORDER BY timestamp
-            """, (current_sensor_id['value'], start_date, end_date))
+                WHERE sensor_id = %s AND sample >= %s AND sample <= %s
+                ORDER BY sample
+            """, (current_sensor_id, start_date, end_date))
             rows = cursor.fetchall()
             if rows:
                 times = []
@@ -139,32 +136,32 @@ def fetch_latest_data():
                     h_vel = float(row[0]) if row[0] is not None else 0.0
                     v_vel = float(row[1]) if row[1] is not None else 0.0
                     a_vel = float(row[2]) if row[2] is not None else 0.0
-                    timestamp = row[3]
-                    if timestamp is not None:
-                        times.append(timestamp)
+                    sample = row[3]
+                    if sample is not None:
+                        times.append(sample)
                         h_vels.append(h_vel)
                         v_vels.append(v_vel)
                         a_vels.append(a_vel)
                     else:
-                        logger.warning("Skipping row with None timestamp")
+                        logger.warning("Skipping row with None sample")
                 logger.info(f"Fetched {len(times)} rows.")
                 return times, h_vels, v_vels, a_vels
             logger.info("No data found for the selected month.")
             return None, None, None, None
             
         cursor.execute("""
-            SELECT h_vel, v_vel, a_vel, EXTRACT(EPOCH FROM timestamp) AS epoch_time 
+            SELECT h_vel, v_vel, a_vel, sample 
             FROM samples 
             WHERE sensor_id = %s 
-            ORDER BY timestamp DESC LIMIT 1
-        """, (current_sensor_id['value'],))
+            ORDER BY sample DESC LIMIT 1
+        """, (current_sensor_id,))
         row = cursor.fetchone()
         if row:
             h_vel = float(row[0]) if row[0] is not None else 0.0
             v_vel = float(row[1]) if row[1] is not None else 0.0
             a_vel = float(row[2]) if row[2] is not None else 0.0
-            timestamp = float(row[3]) if row[3] is not None else time.time()
-            current_time = timestamp - start_time
+            sample_time = float(row[3]) if row[3] is not None else time.time()
+            current_time = sample_time - start_time  # Use sample as a time proxy
             logger.info(f"Fetched latest data: time={current_time}, h_vel={h_vel}, v_vel={v_vel}, a_vel={a_vel}")
             return current_time, h_vel, v_vel, a_vel
         logger.info("No data found for the latest point.")
@@ -176,8 +173,8 @@ def fetch_latest_data():
 def compute_real_frequency(times, velocities):
     if len(times) < 2 or len(velocities) < 2:
         return 0.01
-    if isinstance(times[0], datetime.datetime):
-        times = [pd.Timestamp(t).timestamp() for t in times]
+    if isinstance(times[0], (int, float)):
+        times = [t for t in times]  # Ensure times are numeric
     current_time = times[-1]
     window_start = current_time - freq_window
     window_times = []
@@ -215,12 +212,12 @@ def generate_plot():
     global all_time_values, all_h_vel_values, all_v_vel_values, all_a_vel_values
     global window_start_time
 
-    if not is_paused['value']:
+    if not is_paused:
         current_time = time.time() - start_time
         data = fetch_latest_data()
         
         if data[0] is not None:
-            if is_month_active['value']:
+            if is_month_active:
                 times, h_vels, v_vels, a_vels = data
                 if times:
                     logger.info("Updating with month data...")
@@ -268,7 +265,7 @@ def generate_plot():
                 all_v_vel_values.append(v_vel)
                 all_a_vel_values.append(a_vel)
 
-        if not is_month_active['value']:
+        if not is_month_active:
             while time_values and current_time - time_values[0] > time_window:
                 time_values.pop(0)
                 h_vel_values.pop(0)
@@ -278,16 +275,16 @@ def generate_plot():
                 v_freq_values.pop(0)
                 a_freq_values.pop(0)
 
-    if window_start_time['value'] is None:
-        window_start_time['value'] = max(0, current_time - time_window)
-    if is_scrolling['value'] and not is_month_active['value']:
-        window_start_time['value'] = max(0, current_time - time_window)
-    window_start = window_start_time['value']
+    if window_start_time is None:
+        window_start_time = max(0, current_time - time_window)
+    if is_scrolling and not is_month_active:
+        window_start_time = max(0, current_time - time_window)
+    window_start = window_start_time
     window_end = window_start + time_window
 
-    if is_month_active['value'] and selected_month['value'] is not None:
+    if is_month_active and selected_month is not None:
         current_year = datetime.datetime.now().year
-        start_date = datetime.datetime(current_year, selected_month['value'], 1)
+        start_date = datetime.datetime(current_year, selected_month, 1)
         end_date = (start_date + datetime.timedelta(days=31)).replace(day=1, year=current_year) - datetime.timedelta(days=1)
         window_start = pd.Timestamp(start_date).timestamp() - start_time
         window_end = pd.Timestamp(end_date).timestamp() - start_time
@@ -342,11 +339,11 @@ def generate_plot():
         v_y = display_v_vel
         a_y = display_a_vel
 
-    if show_h['value']:
+    if show_h:
         ax1.plot(x_time, h_y, color='#1f77b4', linewidth=1, label='H Vel (mm/s)')
-    if show_v['value']:
+    if show_v:
         ax1.plot(x_time, v_y, color='#ff7f0e', linewidth=1, label='V Vel (mm/s)')
-    if show_a['value']:
+    if show_a:
         ax1.plot(x_time, a_y, color='#2ca02c', linewidth=1, label='A Vel (mm/s)')
 
     slider_x = window_start + (window_end - window_start) / 2
@@ -374,13 +371,13 @@ def generate_plot():
     h_base = 0
     v_base = section_height
     a_base = 2 * section_height
-    if show_h['value'] and h_freq_values:
+    if show_h and h_freq_values:
         for freq, v in zip(h_freq_values, h_vel_values):
             ax2.plot([freq, freq], [h_base, h_base + v], color='#1f77b4', linewidth=0.5)
-    if show_v['value'] and v_freq_values:
+    if show_v and v_freq_values:
         for freq, v in zip(v_freq_values, v_vel_values):
             ax2.plot([freq, freq], [v_base, v_base + v], color='#ff7f0e', linewidth=0.5)
-    if show_a['value'] and a_freq_values:
+    if show_a and a_freq_values:
         for freq, v in zip(a_freq_values, a_vel_values):
             ax2.plot([freq, freq], [a_base, a_base + v], color='#2ca02c', linewidth=0.5)
     avg_freq = (h_freq_values[-1] + v_freq_values[-1] + a_freq_values[-1]) / 3 if h_freq_values else 0.01
@@ -425,9 +422,9 @@ def index():
     global is_paused
     if request.method == 'POST':
         if 'pause' in request.form:
-            is_paused['value'] = not is_paused['value']
+            is_paused = not is_paused
     img_base64 = generate_plot()
-    return render_template_string(HTML_TEMPLATE, img_data=img_base64, is_paused=is_paused['value'])
+    return render_template_string(HTML_TEMPLATE, img_data=img_base64, is_paused=is_paused)
 
 if __name__ == '__main__':
     try:
